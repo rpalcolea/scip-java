@@ -277,15 +277,21 @@ public class ScipSemanticdb {
                   .setIsReference(supportsReferenceRelationship(info)));
         }
         if (info.hasSignature()) {
-          String language =
-              doc.semanticdb.getLanguage().toString().toLowerCase(Locale.ROOT).intern();
-          String signature = new SignatureFormatter(info, symtab).formatSymbol();
-          Scip.Document.Builder signatureDocumentation =
-              Scip.Document.newBuilder()
-                  .setRelativePath(relativePath)
-                  .setLanguage(language)
-                  .setText(signature);
-          scipInfo.setSignatureDocumentation(signatureDocumentation);
+          try {
+            String language =
+                doc.semanticdb.getLanguage().toString().toLowerCase(Locale.ROOT).intern();
+            String signature = new SignatureFormatter(info, symtab).formatSymbol();
+            Scip.Document.Builder signatureDocumentation =
+                Scip.Document.newBuilder()
+                    .setRelativePath(relativePath)
+                    .setLanguage(language)
+                    .setText(signature);
+            scipInfo.setSignatureDocumentation(signatureDocumentation);
+          } catch (SignatureFormatterException e) {
+            // Signature text is supplementary. Keep this symbol, its relationships,
+            // documentation and occurrences even if its signature cannot be rendered.
+            options.reporter.error(e);
+          }
         }
         String documentation = info.getDocumentation().getMessage();
         if (!documentation.isEmpty()) {

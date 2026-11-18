@@ -1,5 +1,6 @@
 package com.sourcegraph.scip_semanticdb;
 
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.sourcegraph.semanticdb_javac.Semanticdb.SymbolInformation.Property;
 import com.sourcegraph.semanticdb_javac.Semanticdb.*;
 
@@ -407,15 +408,11 @@ public class SignatureFormatter {
     if (annotation.getParametersCount() == 1) {
       b.append('(');
 
-      Tree parameter = annotation.getParameters(0);
+      Tree parameter = annotationParameter(annotation.getParameters(0));
       // if only 1 parameter, and its LHS is named 'value', we can omit the 'value = '
       // https://docs.oracle.com/javase/specs/jls/se8/html/jls-9.html#jls-9.7.3
       AssignTree firstParam = parameter.getAssignTree();
-      if (parameter.hasAssignTree()
-          && SymbolDescriptor.parseFromSymbol(firstParam.getLhs().getIdTree().getSymbol())
-              .descriptor
-              .name
-              .equals("value")) {
+      if (parameter.hasAssignTree() && assignmentName(firstParam).equals("value")) {
         b.append(formatTree(firstParam.getRhs()));
       } else {
         b.append(formatTree(parameter));
@@ -426,6 +423,7 @@ public class SignatureFormatter {
       b.append('(');
       String parameter =
           annotation.getParametersList().stream()
+              .map(this::annotationParameter)
               .map(this::formatTree)
               .collect(Collectors.joining(", "));
       b.append(parameter);
@@ -435,9 +433,34 @@ public class SignatureFormatter {
     return b.toString();
   }
 
+  private Tree annotationParameter(Tree tree) {
+    if (!isScala || !tree.hasAnnotationTree()) return tree;
+    // Scala's standard AssignTree has wire tag 9, which this schema uses for Java's
+    // out-of-spec AnnotationTree. Both messages have two length-delimited fields.
+    // Decode the original bytes as an assignment; in particular, retain the lhs
+    // IdTree stored in Type's unknown fields instead of treating it as a type.
+    try {
+      return Tree.newBuilder()
+          .setAssignTree(AssignTree.parseFrom(tree.getAnnotationTree().toByteString()))
+          .build();
+    } catch (InvalidProtocolBufferException e) {
+      throw new IllegalArgumentException("invalid Scala annotation assignment", e);
+    }
+  }
+
+  private String assignmentName(AssignTree assignment) {
+    // Scala annotation names are plain identifiers, not SemanticDB symbol descriptors.
+    if (isScala && assignment.getLhs().hasIdTree()) {
+      return assignment.getLhs().getIdTree().getSymbol();
+    }
+    return formatTree(assignment.getLhs());
+  }
+
   private String formatTree(Tree tree) {
     if (tree.hasIdTree()) {
-      return SymbolDescriptor.parseFromSymbol(tree.getIdTree().getSymbol()).descriptor.name;
+      String symbol = tree.getIdTree().getSymbol();
+      String name = SymbolDescriptor.parseFromSymbol(symbol).descriptor.name;
+      return isScala && symbol.endsWith("#") ? "classOf[" + name + "]" : name;
     } else if (tree.hasLiteralTree()) {
       return formatConstant(tree.getLiteralTree().getConstant());
     } else if (tree.hasSelectTree()) {
@@ -447,13 +470,16 @@ public class SignatureFormatter {
               .descriptor
               .name;
     } else if (tree.hasAnnotationTree()) {
-      return formatAnnotation(tree.getAnnotationTree());
+      return isScala
+          ? formatTree(annotationParameter(tree))
+          : formatAnnotation(tree.getAnnotationTree());
     } else if (tree.hasApplyTree()) {
-      if (tree.getApplyTree().getFunction().hasIdTree()
-          && tree.getApplyTree().getFunction().getIdTree().getSymbol().equals(ARRAY_SYMBOL)) {
+      if ((isScala && !tree.getApplyTree().hasFunction())
+          || (tree.getApplyTree().getFunction().hasIdTree()
+              && tree.getApplyTree().getFunction().getIdTree().getSymbol().equals(ARRAY_SYMBOL))) {
         return tree.getApplyTree().getArgumentsList().stream()
             .map(this::formatTree)
-            .collect(Collectors.joining(", ", "{", "}"));
+            .collect(Collectors.joining(", ", isScala ? "Array(" : "{", isScala ? ")" : "}"));
       } else {
         throw new IllegalArgumentException(
             "unexpected apply tree function " + tree.getApplyTree().getFunction());
@@ -465,7 +491,7 @@ public class SignatureFormatter {
           + " "
           + formatTree(tree.getBinopTree().getRhs());
     } else if (tree.hasAssignTree()) {
-      return formatTree(tree.getAssignTree().getLhs())
+      return assignmentName(tree.getAssignTree())
           + " = "
           + formatTree(tree.getAssignTree().getRhs());
     } else if (tree.hasUnaryopTree()) {
